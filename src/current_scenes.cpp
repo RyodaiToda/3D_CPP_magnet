@@ -2,6 +2,7 @@
 // current_scenes.cpp : 電流の導線とコイルを見せるシーン（current_scenes.h）
 // ---------------------------------------------------------------------------
 #include "current_scenes.h"
+#include "keymap.h"
 
 #include "demo_common.h"
 #include "electric_scenes.h"
@@ -127,8 +128,8 @@ public:
         if (IsKeyPressed(KEY_ENTER)) { build(host); return; }
         if (IsKeyPressed(KEY_X)) on = !on;
         if (IsKeyPressed(KEY_V)) { if (mode == 0) sign = -sign; else sameDir = !sameDir; }
-        if (IsKeyPressed(KEY_RIGHT_BRACKET)) scale = std::min(3.0f, scale * 1.25f);
-        if (IsKeyPressed(KEY_LEFT_BRACKET))  scale = std::max(0.2f, scale / 1.25f);
+        if (IsKeyPressed(keyRightBracket())) scale = std::min(3.0f, scale * 1.25f);
+        if (IsKeyPressed(keyLeftBracket()))  scale = std::max(0.2f, scale / 1.25f);
         applyCurrent(w);
     }
 
@@ -268,6 +269,7 @@ public:
         else           buildGun(host);
         applyCurrent(w);
         wantCameraReset = true;
+        wantFieldLinesReset = true;   // 電磁石は磁力線あり、コイルガンはなし（球が見えるように）
     }
 
     void beforeStep(World& w, float dt) override {
@@ -284,27 +286,35 @@ public:
                 stageSpeed[k] = ball->velocity.x;
             }
         }
+        if (started) {   // 球の軌跡（灰色の球がレールの上で見えにくいので）
+            ballTrail.push_back(ball->position);
+            if (ballTrail.size() > 240) ballTrail.erase(ballTrail.begin(), ballTrail.begin() + (ballTrail.size() - 240));
+        }
     }
 
     void handleInput(SceneHost& host) override {
         World& w = host.world;
         if (IsKeyPressed(KEY_M)) { mode = (mode + 1) % 2; build(host); return; }
-        if (IsKeyPressed(KEY_ENTER)) {
+        if (IsKeyPressed(KEY_ENTER) || (mode == 1 && IsKeyPressed(KEY_X))) {   // コイルガンは Enter でも X でも発射
             if (mode == 1 && !started) started = true;
             else build(host);
             return;
         }
         if (IsKeyPressed(KEY_X)) on = !on;
         if (IsKeyPressed(KEY_V)) autoSwitch = !autoSwitch;
-        if (IsKeyPressed(KEY_RIGHT_BRACKET)) scale = std::min(3.0f, scale * 1.25f);
-        if (IsKeyPressed(KEY_LEFT_BRACKET))  scale = std::max(0.2f, scale / 1.25f);
+        if (IsKeyPressed(keyRightBracket())) scale = std::min(3.0f, scale * 1.25f);
+        if (IsKeyPressed(keyLeftBracket()))  scale = std::max(0.2f, scale / 1.25f);
         if (mode == 0) applyCurrent(w);
     }
 
     void draw3D(const World& w) const override {
-        if (mode == 1) {   // 段の後ろの測る位置（床の線）
+        if (mode == 1) {   // 段の後ろの測る位置（床の線）と、球の軌跡
             for (float x : COIL_X)
                 DrawLine3D(Vector3{x + 1.0f, RAIL_TOP + 0.005f, -0.5f}, Vector3{x + 1.0f, RAIL_TOP + 0.005f, 0.5f}, Fade(RAYWHITE, 0.5f));
+            for (size_t i = 1; i < ballTrail.size(); ++i)
+                DrawLine3D(toRay(ballTrail[i - 1]), toRay(ballTrail[i]), Fade(COL_ARROW, 0.15f + 0.85f * (float)i / ballTrail.size()));
+            if (ball && !started)   // 発射前: 球の上に印
+                arrow(ball->position + Vec3{0, 1.2f, 0}, ball->position + Vec3{0, 0.45f, 0}, 0.03f, COL_ARROW);
         }
         (void)w;
     }
@@ -327,10 +337,10 @@ public:
             out.add("field lines: the flux crowds into the core and leaves through its end (the pole)", GRAY, 14);
         } else {
             out.add("coil gun: each coil is ON only while the ball approaches, OFF once the center passes", COL_TITLE);
-            std::snprintf(buf, sizeof buf, "coil current %.2f x %d turns   switching %s   ball %.2f m/s   %s", I_GUN * scale, GUN_TURNS,
-                          autoSwitch ? "automatic" : "OFF (stays on: the coil pulls the ball back)", ball ? ball->velocity.x : 0.0f,
-                          started ? "" : "Enter to fire");
+            std::snprintf(buf, sizeof buf, "coil current %.2f x %d turns   switching %s   ball %.2f m/s", I_GUN * scale, GUN_TURNS,
+                          autoSwitch ? "automatic" : "OFF (stays on: the coil pulls the ball back)", ball ? ball->velocity.x : 0.0f);
             out.add(buf);
+            if (!started) out.add(">>> press Enter (or X) to fire: the first coil switches on and pulls the ball in", COL_ARROW);
             for (size_t k = 0; k < coils.size(); ++k) {
                 std::snprintf(buf, sizeof buf, "  after coil %zu: %s%.2f m/s   theory %.1f (rolling) to %.1f (sliding)", k + 1, passed[k] ? "" : "-",
                               passed[k] ? stageSpeed[k] : 0.0f, stageTheory[k], stageTheory[k] * std::sqrt(1.4f));
@@ -341,7 +351,7 @@ public:
         }
         out.gap(4);
         out.add(mode == 0 ? "M layout   X current on/off   [ ] strength   Enter restart   O field lines"
-                          : "M layout   Enter fire / restart   V switching on/off   [ ] strength   O field lines", GRAY);
+                          : "M layout   Enter or X fire / restart   V switching on/off   [ ] strength   O field lines", GRAY);
     }
 
 private:
@@ -360,6 +370,7 @@ private:
     std::vector<RigidBody*> held;
     std::vector<int>   coils;
     std::vector<float> stageSpeed, stageTheory;
+    std::vector<Vec3>  ballTrail;
 
     void applyCurrent(World& w) {
         if (mode != 0) return;
@@ -405,6 +416,7 @@ private:
         w.substeps = 8;
         started = false;
         t = 0.0f;
+        ballTrail.clear();
         for (bool& p : passed) p = false;
         RigidBody* rail = host.addStatic({4.5f, RAIL_TOP - 0.03f, 0}, {7.5f, 0.03f, 0.6f}, Color{150, 158, 172, 220}, 0.7f, 0.05f);
         (void)rail;
@@ -430,7 +442,7 @@ private:
         }
         ball->position.x = -1.0f;
         w.magnets().updateMoments(30);
-        camTargetX = 4.0f; camTargetY = 1.5f; camTargetZ = 0.0f;   // 注視点を上にして、レールを画面の下に出す（HUD にかくれない）
+        camTargetX = 4.0f; camTargetY = 2.1f; camTargetZ = 0.0f;   // 注視点を上にして、レールと左端の球を HUD の下に出す
         camDistance = 9.5f; camPitch = 0.22f; camYaw = 0.0f;
     }
 };

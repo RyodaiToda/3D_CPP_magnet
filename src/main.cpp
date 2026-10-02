@@ -844,6 +844,11 @@ int main() {
                 demo.camYawPref   = demo.fun->camYaw;
                 if (!fps) resetCamera();
             }
+            if (demo.fun->wantFieldLinesReset) {
+                demo.fun->wantFieldLinesReset = false;
+                demo.fieldLinesOn = demo.fun->wantsFieldLines();
+                demo.tracer.reset();
+            }
         }
 
         int nextScene = -1;

@@ -36,7 +36,7 @@ add_library(physics STATIC
 target_include_directories(physics PUBLIC src)
 
 # --- デモ ------------------------------------------------------------------
-add_executable(demo src/main.cpp src/fun_scenes.cpp src/electric_scenes.cpp src/current_scenes.cpp)
+add_executable(demo src/main.cpp src/fun_scenes.cpp src/electric_scenes.cpp src/current_scenes.cpp src/keymap.cpp)
 target_link_libraries(demo PRIVATE physics raylib)
 
 if(APPLE)
@@ -71,7 +71,7 @@ add_library(flowcore STATIC
     src/flow/flow_records.cpp)
 target_link_libraries(flowcore PUBLIC physics)
 
-add_executable(magnet_flow src/flow/flow_main.cpp src/flow/flow_audio.cpp)
+add_executable(magnet_flow src/flow/flow_main.cpp src/flow/flow_audio.cpp src/keymap.cpp)
 target_link_libraries(magnet_flow PRIVATE flowcore raylib)
 if(APPLE)
     target_link_libraries(magnet_flow PRIVATE

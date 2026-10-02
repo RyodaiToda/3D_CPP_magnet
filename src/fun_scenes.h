@@ -76,6 +76,7 @@ public:
     float timeScale   = 10.0f;   // 実時間と同じ速さ
     float chargeRef   = 1.0f;    // 電荷の色がいちばん濃くなる電荷（電気のシーン）
     bool  wantCameraReset = false;   // 配置を変えたときなど、推奨カメラに戻してほしい
+    bool  wantFieldLinesReset = false;   // 配置を変えたので、磁力線の ON/OFF を wantsFieldLines() に戻してほしい
 };
 
 std::unique_ptr<FunScene> makeRollerScene();    // A

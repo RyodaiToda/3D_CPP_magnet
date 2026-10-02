@@ -2,6 +2,7 @@
 // fun_scenes.cpp : 磁力を見せるシーン A・B・C・D・E（fun_scenes.h）
 // ---------------------------------------------------------------------------
 #include "fun_scenes.h"
+#include "keymap.h"
 
 #include "demo_common.h"
 #include "field_lines.h"
@@ -134,8 +135,8 @@ public:
         if (IsKeyDown(KEY_RIGHT)) heading += 1.5f * dt;
         if (IsKeyPressed(KEY_UP))   freqHz = std::min(10.0f, freqHz * 1.25f);
         if (IsKeyPressed(KEY_DOWN)) freqHz = std::max(0.05f, freqHz / 1.25f);
-        if (IsKeyPressed(KEY_RIGHT_BRACKET)) B0 = std::min(200.0f, B0 * 1.25f);
-        if (IsKeyPressed(KEY_LEFT_BRACKET))  B0 = std::max(0.5f, B0 / 1.25f);
+        if (IsKeyPressed(keyRightBracket())) B0 = std::min(200.0f, B0 * 1.25f);
+        if (IsKeyPressed(keyLeftBracket()))  B0 = std::max(0.5f, B0 / 1.25f);
         if (IsKeyPressed(KEY_X)) fieldOn = !fieldOn;
         if (IsKeyPressed(KEY_V)) reverse = !reverse;
         if (IsKeyPressed(KEY_M)) { layout = (layout + 1) % 3; build(host); }
@@ -374,8 +375,8 @@ public:
         if (IsKeyDown(KEY_RIGHT)) probePos.x += v * dt;
         if (IsKeyDown(KEY_UP))    probePos.z -= v * dt;
         if (IsKeyDown(KEY_DOWN))  probePos.z += v * dt;
-        if (IsKeyPressed(KEY_RIGHT_BRACKET)) probePos.y = std::min(5.0f, probePos.y + 0.3f);
-        if (IsKeyPressed(KEY_LEFT_BRACKET))  probePos.y = std::max(HEIGHT + 0.7f, probePos.y - 0.3f);
+        if (IsKeyPressed(keyRightBracket())) probePos.y = std::min(5.0f, probePos.y + 0.3f);
+        if (IsKeyPressed(keyLeftBracket()))  probePos.y = std::max(HEIGHT + 0.7f, probePos.y - 0.3f);
         if (IsKeyPressed(KEY_V)) {
             probeSign = -probeSign;
             probe->orientation = (probeSign > 0) ? Quat{} : Quat::fromAxisAngle({1, 0, 0}, PHYS_PI);
@@ -639,8 +640,8 @@ public:
         if (IsKeyDown(KEY_UP))    b->position.z -= 2.0f * dt;
         if (IsKeyDown(KEY_DOWN))  b->position.z += 2.0f * dt;
         float turn = 0.0f;
-        if (IsKeyDown(KEY_LEFT_BRACKET))  turn += 1.5f * dt;
-        if (IsKeyDown(KEY_RIGHT_BRACKET)) turn -= 1.5f * dt;
+        if (IsKeyDown(keyLeftBracket()))  turn += 1.5f * dt;
+        if (IsKeyDown(keyRightBracket())) turn -= 1.5f * dt;
         if (turn != 0.0f) {
             b->orientation = Quat::fromAxisAngle({0, 1, 0}, turn) * b->orientation;
             b->orientation.normalizeInPlace();

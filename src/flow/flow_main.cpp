@@ -26,6 +26,7 @@
 #include "rlgl.h"
 
 #include "field_lines.h"
+#include "keymap.h"
 #include "flow/flow_audio.h"
 #include "flow/flow_records.h"
 #include "flow/flow_stages.h"
@@ -371,8 +372,8 @@ struct Game {
             if (big && !full && fw.state == State::Running) { fw.resetToCheckpoint(); missMsg = 0.0f; }   // 最後のチェックポイントへ
             else if (!big || full || fw.state != State::Failed) { restart(); zoneBanner = big ? 3.0f : 0.0f; }
         }
-        if (big && (IsKeyPressed(KEY_LEFT_BRACKET) || IsKeyPressed(KEY_RIGHT_BRACKET))) {   // 練習: 前・次のチェックポイント
-            const int d  = IsKeyPressed(KEY_RIGHT_BRACKET) ? 1 : -1;
+        if (big && (IsKeyPressed(demo::keyLeftBracket()) || IsKeyPressed(demo::keyRightBracket()))) {   // 練習: 前・次のチェックポイント
+            const int d  = IsKeyPressed(demo::keyRightBracket()) ? 1 : -1;
             const int cp = std::max(0, std::min(fw.checkpointTotal - 1, std::max(0, fw.checkpoint) + d));
             warp(cp);
         }
