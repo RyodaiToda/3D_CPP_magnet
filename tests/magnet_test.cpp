@@ -1,6 +1,9 @@
 // 磁石・砂鉄のヘッドレス検証（raylib 不要）
 //   magnet_test [--csv <dir>]   --csv を付けると T3 のエネルギー時系列を CSV で出す
 #include "phys/world.h"
+#include "field_lines.h"
+#include "gauss_rail.h"
+#include "levitation_theory.h"
 
 #include <chrono>
 #include <cmath>
@@ -69,6 +72,32 @@ static Vec3 angularMomentum(const World& w) {
         L += cross(b->position, b->velocity * M) + b->angularVelocity * (1.0f / b->invInertiaLocal.x);
     }
     return L;
+}
+
+// 箱も含む一般の角運動量（自転は R I R^T w）
+static Vec3 angularMomentumGeneral(const World& w) {
+    Vec3 L{0, 0, 0};
+    for (const auto& b : w.getBodies()) {
+        if (b->isStatic()) continue;
+        float M = 1.0f / b->invMass;
+        Mat3 R  = b->orientation.toMat3();
+        Vec3 wl = R.transposed() * b->angularVelocity;
+        Vec3 Il{wl.x / b->invInertiaLocal.x, wl.y / b->invInertiaLocal.y, wl.z / b->invInertiaLocal.z};
+        L += cross(b->position, b->velocity * M) + R * Il;
+    }
+    return L;
+}
+
+static RigidBody* addMagnetBox(World& w, const Vec3& pos, const Vec3& he, float mass,
+                               const Vec3& momentLocal, const Quat& q = Quat{}) {
+    RigidBody* b = w.createMagnetBox(pos, he, mass, momentLocal, q);
+    b->linearDamping  = 0.0f;
+    b->angularDamping = 0.0f;
+    return b;
+}
+
+static void clearForces(World& w) {
+    for (const auto& b : w.getBodies()) { b->force = Vec3{0, 0, 0}; b->torque = Vec3{0, 0, 0}; }
 }
 
 static void simulate(World& w, float seconds, int substeps = SUBSTEPS) {
@@ -466,6 +495,452 @@ int main(int argc, char** argv) {
         check("I4 momentum with induced grains", finite && err < 1e-4f, buf);
     }
 
+    // ---------------- X1. 反磁場係数と誘導係数 ----------------
+    {
+        Vec3  Nc = demagFactors({0.5f, 0.5f, 0.5f});
+        float worstSum = 0.0f;
+        for (int k = 0; k < 20; ++k) {
+            Vec3 he{0.05f + uni(rng), 0.05f + uni(rng), 0.05f + uni(rng)};
+            Vec3 N = demagFactors(he);
+            worstSum = std::max(worstSum, std::fabs(N.x + N.y + N.z - 1.0f));
+        }
+        // 細長い棒は長い向きに磁化しやすい。chi -> 無限大 で球は r^3、箱は V / (4 pi N)
+        Vec3  aBar   = boxSusceptibility({0.05f, 0.4f, 0.05f}, 1e6f);
+        float aSph   = sphereSusceptibility(0.5f, 1e6f);
+        Vec3  Nbar   = demagFactors({0.05f, 0.4f, 0.05f});
+        float Vbar   = 8.0f * 0.05f * 0.4f * 0.05f;
+        float errBar = std::fabs(aBar.y - Vbar / (4.0f * PHYS_PI * Nbar.y)) / aBar.y;
+        std::snprintf(buf, sizeof buf, "cube N=(%.4f,%.4f,%.4f) |sum-1|<%.1e  bar alpha long/short %.1f  sphere %.4f",
+                      Nc.x, Nc.y, Nc.z, worstSum, aBar.y / aBar.x, aSph);
+        check("X1 demag factors & susceptibility",
+              std::fabs(Nc.x - 1.0f / 3) < 1e-4f && std::fabs(Nc.z - 1.0f / 3) < 1e-4f && worstSum < 1e-4f &&
+              errBar < 1e-3f && aBar.y > 5.0f * aBar.x && std::fabs(aSph - 0.125f) < 1e-5f, buf);
+    }
+
+    // ---------------- X2. 立方体の磁石どうしの力（厳密な表面磁荷モデルと比較） ----------------
+    //   辺 1、モーメント 1 の立方体 2 個。参照値は一様磁化の直方体の表面磁荷を
+    //   数値積分したもの（tools/cube_reference.py）。単位 K m^2 / a^4
+    {
+        struct Case { const char* name; Vec3 pos; float sign; Vec3 ref; };
+        const Case cases[] = {
+            {"coaxial touch", {0, 0, 1.0f}, 1.0f, {0, 0, -5.113f}},
+            {"side parallel", {1.0f, 0, 0}, 1.0f, {2.556f, 0, 0}},
+            {"side antipar.", {1.0f, 0, 0}, -1.0f, {-2.556f, 0, 0}},
+            {"slide 1/4", {0.25f, 0, 1.0f}, 1.0f, {-1.515f, 0, -3.582f}},
+        };
+        std::string table;
+        float worstAxis = 0.0f, worstSlide = 0.0f, worstMom = 0.0f;
+        for (const Case& c : cases) {
+            World w;
+            w.gravity = Vec3{0, 0, 0};
+            RigidBody* a = addMagnetBox(w, {0, 0, 0}, {0.5f, 0.5f, 0.5f}, 1.0f, {0, 0, 1.0f});
+            RigidBody* b = addMagnetBox(w, c.pos, {0.5f, 0.5f, 0.5f}, 1.0f, {0, 0, c.sign});
+            w.magnets().applyForces();
+            float err = length(b->force - c.ref) / length(c.ref);
+            worstMom  = std::max(worstMom, length(a->force + b->force) / length(c.ref));
+            if (c.pos.x == 0.25f) worstSlide = std::max(worstSlide, err);
+            else                  worstAxis  = std::max(worstAxis, err);
+            char row[64];
+            std::snprintf(row, sizeof row, " %s %.1f%%", c.name, err * 100.0f);
+            table += row;
+        }
+        std::snprintf(buf, sizeof buf, "%s", table.c_str());
+        check("X2 cube-cube force vs exact (axis <3%)", worstAxis < 0.03f && worstSlide < 0.15f &&
+                                                     worstMom < 1e-6f, buf);
+    }
+
+    // ---------------- X3. 近い・遠いの切り替えでの力の跳び ----------------
+    //   立方体は中心の双極子とのずれが (a/r)^4 で小さいので跳びもほぼない。
+    //   細長い箱は (L/r)^2 のずれが残る（記録のみ。接触力に比べれば 1e-4 以下）
+    {
+        auto jump = [&](const Vec3& he) {
+            float worst = 0.0f;
+            for (int k = 0; k < 20; ++k) {
+                Vec3 dir = randomDir();
+                Quat qa  = Quat::fromAxisAngle(randomDir(), uni(rng) * PHYS_PI);
+                Quat qb  = Quat::fromAxisAngle(randomDir(), uni(rng) * PHYS_PI);
+                Vec3  F[2];
+                float scale = 1.0f;
+                for (int side = 0; side < 2; ++side) {
+                    World w;
+                    w.gravity = Vec3{0, 0, 0};
+                    addMagnetBox(w, {0, 0, 0}, he, 1.0f, {0, 1.0f, 0}, qa);
+                    float rs = w.magnets().nearScale * 2.0f * w.magnets().bodies()[0].boundRadius;   // 切り替えの距離
+                    RigidBody* b = addMagnetBox(w, dir * (rs * (side ? 1.0005f : 0.9995f)), he, 1.0f, {0, 1.0f, 0}, qb);
+                    w.magnets().applyForces();
+                    F[side] = b->force;
+                    scale   = 3.0f / (rs * rs * rs * rs);   // 力の大きさの目安 3 m^2 / r^4（向きで打ち消すことがある）
+                }
+                worst = std::max(worst, length(F[1] - F[0]) / scale);
+            }
+            return worst;
+        };
+        float cube = jump({0.25f, 0.25f, 0.25f});
+        float bar  = jump({0.5f, 0.3f, 0.2f});
+        std::snprintf(buf, sizeof buf, "worst |F_far - F_near| / (3m^2/r^4): cube %.2f%%  (1.0x0.6x0.4 box %.1f%%)",
+                      cube * 100.0f, bar * 100.0f);
+        check("X3 near / far switch is smooth (cube <1%)", cube < 0.01f, buf);
+    }
+
+    // ---------------- X4. 箱を含む運動量・角運動量の保存（接触なし） ----------------
+    //   非対称な箱の自由回転は、磁力がなくても積分器（ジャイロ項）の誤差で L が少しずれる。
+    //   同じ初期状態で磁性を消した場合と比べ、磁力が加えたずれだけを見る
+    {
+        auto run = [&](bool magnetic, int substeps, float& errP, float& errL, int& contacts) {
+            World w;
+            w.gravity = Vec3{0, 0, 0};
+            RigidBody* a = addMagnetBox(w, {-1.4f, 0, 0}, {0.3f, 0.2f, 0.15f}, 1.0f, {0, 0.8f, 0},
+                                        Quat::fromAxisAngle(normalize(Vec3{1, 2, 3}), 0.7f));
+            RigidBody* b = addMagnetBox(w, {1.4f, 0.3f, 0}, {0.25f, 0.25f, 0.25f}, 1.0f, {0.6f, 0, 0},
+                                        Quat::fromAxisAngle(normalize(Vec3{-2, 1, 0}), 1.1f));
+            const Vec3 heI{0.08f, 0.35f, 0.08f};
+            RigidBody* c = w.createSoftMagnetBox({0, 1.3f, 0.4f}, heI, 0.3f, boxSusceptibility(heI, 1000.0f), 0.0f,
+                                                 Quat::fromAxisAngle({0, 0, 1}, 0.9f));
+            c->linearDamping = c->angularDamping = 0.0f;
+            a->angularVelocity = Vec3{0.5f, 1.0f, -0.3f};
+            b->angularVelocity = Vec3{-0.4f, 0.2f, 0.8f};
+            if (!magnetic)
+                for (MagneticBody& mb : w.magnets().bodies()) mb.permanentLocal = mb.chiLocal = Vec3{0, 0, 0};
+            w.magnets().updateMoments(10);
+
+            Vec3 P0 = linearMomentum(w), L0 = angularMomentumGeneral(w);
+            contacts = 0;
+            w.substeps = substeps;
+            for (int i = 0; i < (int)std::lround(3.0f / DT); ++i) {
+                w.step(DT);
+                contacts = std::max(contacts, w.contactCount());
+            }
+            errP = length(linearMomentum(w) - P0);
+            errL = length(angularMomentumGeneral(w) - L0) / length(L0);
+        };
+        float errP, errL, errP0, errL0, errP32, errL32;
+        int contacts, contacts0, contacts32;
+        run(true, SUBSTEPS, errP, errL, contacts);
+        run(false, SUBSTEPS, errP0, errL0, contacts0);
+        run(true, 4 * SUBSTEPS, errP32, errL32, contacts32);
+
+        // 1 回の力の評価では、原点まわりの全トルク sum (x x F + tau) が丸め誤差の範囲で 0
+        float netTorque, torqueScale;
+        {
+            World w;
+            addMagnetBox(w, {-0.3f, 0, 0}, {0.3f, 0.2f, 0.15f}, 1.0f, {0, 0.8f, 0},
+                         Quat::fromAxisAngle(normalize(Vec3{1, 2, 3}), 0.7f));
+            addMagnetBox(w, {0.35f, 0.3f, 0}, {0.25f, 0.25f, 0.25f}, 1.0f, {0.6f, 0, 0},
+                         Quat::fromAxisAngle(normalize(Vec3{-2, 1, 0}), 1.1f));
+            w.magnets().applyForces();
+            Vec3 T{0, 0, 0};
+            torqueScale = 0.0f;
+            for (const auto& b : w.getBodies()) {
+                T += cross(b->position, b->force) + b->torque;
+                torqueScale = std::max(torqueScale, length(b->torque));
+            }
+            netTorque = length(T) / torqueScale;
+        }
+        std::snprintf(buf, sizeof buf, "net torque %.1e  dP=%.1e  dL/L: %d sub %.1e, %d sub %.1e (no magnetism %.1e)",
+                      netTorque, errP, SUBSTEPS, errL, 4 * SUBSTEPS, errL32, errL0);
+        // 残る dL は積分の誤差（刻みを 1/4 にすると減る）
+        check("X4 momentum & ang. momentum with boxes",
+              netTorque < 1e-5f && errP < 1e-4f && errL < 5e-3f && errL32 < 0.5f * errL && contacts == 0, buf);
+    }
+
+    // ---------------- X5. 一様な外部磁場: 力 0、トルク m x B0、誘導 m = alpha B0 ----------------
+    {
+        World w;
+        w.gravity = Vec3{0, 0, 0};
+        const Vec3 B0{0.0f, 2.0f, 0.5f};
+        w.magnets().externalField = B0;
+        RigidBody* mag  = addMagnet(w, {-5.0f, 0, 0}, {1, 0, 0}, 1.0f);
+        const float alpha = sphereSusceptibility(R_MAG, 7.0f);
+        RigidBody* iron = addIron(w, {5.0f, 0, 0}, R_MAG, M_MAG, alpha);
+        w.magnets().updateMoments(5);
+        clearForces(w);
+        w.magnets().applyForces();
+        // 2 つは 10 離してあるので、互いの場は B0 の 1e-3 程度
+        const Vec3& mi = w.magnets().bodies()[1].m;
+        float errT = length(mag->torque - cross(Vec3{1, 0, 0}, B0)) / length(cross(Vec3{1, 0, 0}, B0));
+        float errM = length(mi - B0 * alpha) / length(B0 * alpha);
+        float Fsum = length(mag->force) + length(iron->force);
+        std::snprintf(buf, sizeof buf, "torque vs m x B0 %.1e  induced m vs alpha B0 %.1e  |F| %.1e (mutual only)",
+                      errT, errM, Fsum);
+        check("X5 uniform field: torque & induction", errT < 1e-3f && errM < 2e-3f && Fsum < 1e-3f, buf);
+    }
+
+    // ---------------- X6. 外部磁場中の方位磁針（エネルギー保存） ----------------
+    //   磁石球を磁場から 60 度傾けて放す。振り子と同じで、U = -m.B0 と回転エネルギーの和が一定
+    {
+        World w;
+        w.gravity = Vec3{0, 0, 0};
+        w.magnets().externalField = Vec3{0.5f, 0, 0};   // 周期 0.4 s（刻み 1/960 s で 1 周 400 ステップ）
+        addMagnet(w, {0, 0, 0}, {std::cos(1.047f), std::sin(1.047f), 0}, M0);
+        float E0 = w.energy().total(), maxDev = 0.0f, Urange = 0.0f;
+        float Umin = 1e9f, Umax = -1e9f;
+        w.substeps = SUBSTEPS;
+        for (int i = 0; i < (int)std::lround(10.0f / DT); ++i) {
+            w.step(DT);
+            EnergyReport e = w.energy();
+            maxDev = std::max(maxDev, std::fabs(e.total() - E0));
+            Umin = std::min(Umin, e.magnetic);
+            Umax = std::max(Umax, e.magnetic);
+        }
+        Urange = Umax - Umin;
+        std::snprintf(buf, sizeof buf, "max |E - E0| / swing of U = %.2f%%  (U swings %.1f)",
+                      maxDev / Urange * 100.0f, Urange);
+        check("X6 compass in uniform field conserves E", maxDev / Urange < 0.01f && Urange > 0.5f, buf);
+    }
+
+    // ---------------- X7. 鉄の棒は長い向きを外部磁場にそろえる ----------------
+    {
+        World w;
+        w.gravity = Vec3{0, 0, 0};
+        const Vec3 B0{3.0f, 0, 0};
+        w.magnets().externalField = B0;
+        const Vec3 he{0.05f, 0.4f, 0.05f};
+        RigidBody* bar = w.createSoftMagnetBox({0, 0, 0}, he, 0.1f, boxSusceptibility(he, 1000.0f), 0.0f,
+                                               Quat::fromAxisAngle({0, 0, 1}, 0.785f));   // 長い軸 (+y) を 45 度
+        bar->angularDamping = 2.0f;
+        simulate(w, 10.0f);
+        Vec3  axis  = bar->orientation.rotate(Vec3{0, 1, 0});
+        float angle = std::acos(std::min(1.0f, std::fabs(dot(axis, normalize(B0))))) * 180.0f / PHYS_PI;
+        std::snprintf(buf, sizeof buf, "angle between bar and field after 10 s: %.2f deg (start 45)", angle);
+        check("X7 iron bar aligns with field", angle < 3.0f, buf);
+    }
+
+    // ---------------- X8. 外部磁場と誘導を含むエネルギーと力の整合 ----------------
+    {
+        World w;
+        w.gravity = Vec3{0, 0, 0};
+        w.magnets().externalField = Vec3{0.5f, -0.3f, 0.8f};
+        addMagnet(w, {0, 0, 0}, {1.0f, 0.3f, 0.0f}, 1.0f);
+        const Vec3 he{0.3f, 0.2f, 0.25f};
+        RigidBody* A = w.createSoftMagnetBox({1.3f, 0.4f, 0.1f}, he, 1.0f, boxSusceptibility(he, 50.0f), 0.0f,
+                                             Quat::fromAxisAngle(normalize(Vec3{1, 1, 0}), 0.4f));
+        addIron(w, {1.2f, -0.9f, 0.3f}, R_MAG, M_MAG, sphereSusceptibility(R_MAG, 7.0f));
+
+        const Vec3 xA = A->position;
+        const Vec3 e  = normalize(Vec3{1, -1, 2});
+        auto energyAt = [&](const Vec3& p) {
+            A->position = p;
+            w.magnets().updateMoments(80);
+            return w.magnets().potentialEnergy();
+        };
+        const float h = 1e-3f;
+        float Fnum = -(energyAt(xA + e * h) - energyAt(xA - e * h)) / (2 * h);
+        A->position = xA;
+        w.magnets().updateMoments(80);
+        clearForces(w);
+        w.magnets().applyForces();
+        float Fe  = dot(A->force, e);
+        float err = std::fabs(Fe - Fnum) / length(A->force);
+        std::snprintf(buf, sizeof buf, "F.e=%.5e  -dU/ds=%.5e  err %.1e", Fe, Fnum, err);
+        check("X8 energy vs force (box, field, induced)", err < 2e-3f, buf);
+    }
+
+    // ---------------- P1. 位置を固定した磁石（方位磁針）は動かずに磁場へ向く ----------------
+    {
+        World w;
+        w.substeps = 4;
+        w.magnets().externalField = Vec3{3.0f, 0, 0};
+        RigidBody* a = addMagnet(w, {0, 1.0f, 0}, {0, 1, 0.2f}, M0);
+        RigidBody* b = addMagnet(w, {0.6f, 1.0f, 0}, {0, -1, 0}, M0);   // 近くの磁石からも力を受ける
+        a->angularDamping = b->angularDamping = 1.0f;
+        w.setPinned(a, true);
+        const Vec3 p0 = a->position;
+        simulate(w, 5.0f, 4);
+        Vec3  m     = w.magnets().bodies()[0].m;
+        float moved = length(a->position - p0);
+        float angle = std::acos(std::min(1.0f, dot(normalize(m), normalize(w.magnets().bodies()[0].B)))) * 180.0f / PHYS_PI;
+        std::snprintf(buf, sizeof buf, "moved %.1e   angle to local field %.2f deg   free magnet moved %.2f",
+                      moved, angle, length(b->position - Vec3{0.6f, 1.0f, 0}));
+        check("P1 pinned magnet only rotates", moved < 1e-6f && angle < 2.0f, buf);
+    }
+
+    // ---------------- L1. 浮かぶ磁石の塔のつり合い（シーン 0 と同じ構成） ----------------
+    //   摩擦 0 の筒に立方体の磁石 6 個を交互の向きで入れ、20 秒後の高さを点双極子の
+    //   つり合い（levitation_theory.h、全ペア）と比べる
+    {
+        const int   N    = 6;
+        const float half = 0.25f, V = 0.125f;
+        const float sphereVol = 4.0f / 3.0f * PHYS_PI * R_MAG * R_MAG * R_MAG;
+        const float m = M0 * V / sphereVol, mass = M_MAG * V / sphereVol;
+        std::vector<float> mu(N);
+        for (int k = 0; k < N; ++k) mu[k] = (k % 2 == 0) ? m : -m;
+        std::vector<float> yt = demo::dipoleStackEquilibrium(mu, mass, G_ACC, half);
+
+        World w;
+        w.substeps = SUBSTEPS;
+        w.createBox({0, -1.0f, 0}, {30, 1, 30}, 0.0f);
+        const float in = half + 0.02f, t = 0.05f, h = 0.5f * (yt.back() + 3.0f);
+        for (int s = -1; s <= 1; s += 2) {
+            RigidBody* wx = w.createBox({s * (in + t), h, 0}, {t, h, in + 2 * t}, 0.0f);
+            RigidBody* wz = w.createBox({0, h, s * (in + t)}, {in, h, t}, 0.0f);
+            wx->friction = wz->friction = 0.0f;
+        }
+        std::vector<RigidBody*> cubes;
+        for (int k = 0; k < N; ++k) {
+            RigidBody* c = w.createMagnetBox({0, half + (yt[k] - half) * 0.95f, 0}, {half, half, half}, mass,
+                                             {0, mu[k], 0});
+            c->friction = 0.4f; c->restitution = 0.2f; c->linearDamping = 0.5f;   // 振動を止めてから比べる
+            cubes.push_back(c);
+        }
+        simulate(w, 20.0f);
+        float worst = 0.0f;
+        std::string table;
+        for (int k = 1; k < N; ++k) {
+            float d = (cubes[k]->position.y - yt[k]) / (yt[k] - half);
+            worst = std::max(worst, std::fabs(d));
+            char row[32];
+            std::snprintf(row, sizeof row, " %.2f/%.2f", cubes[k]->position.y, yt[k]);
+            table += row;
+        }
+        std::snprintf(buf, sizeof buf, "sim/theory:%s  worst %.2f%%", table.c_str(), worst * 100.0f);
+        check("L1 levitating tower matches theory (<1%)", worst < 0.01f, buf);
+    }
+
+    // ---------------- R1. 回転する一様な磁場で磁石が転がる ----------------
+    //   磁場を x-y 面の中で x → y の向きに回すと、磁石は z 軸まわりに回り、-x へ転がる。
+    //   滑らずに転がるなら速さは 2 pi f R
+    {
+        World w;
+        w.substeps = SUBSTEPS;
+        RigidBody* g = w.createBox({0, -1.0f, 0}, {30, 1, 30}, 0.0f);
+        g->friction = 0.7f;
+        RigidBody* a = addMagnet(w, {0, R_MAG, 0}, {1, 0, 0}, M0);
+        a->friction = 0.3f; a->rollingFriction = 0.01f;
+        const float f = 0.1f, B0 = 5.0f;   // 実時間の 1 Hz
+        const int   steps = (int)std::lround(10.0f / DT);
+        for (int i = 1; i <= steps; ++i) {
+            float ph = 2.0f * PHYS_PI * f * i * DT;
+            w.magnets().externalField = Vec3{std::cos(ph), std::sin(ph), 0} * B0;
+            w.step(DT);
+        }
+        float ideal = 2.0f * PHYS_PI * f * R_MAG * 10.0f;
+        float ratio = -a->position.x / ideal;
+        std::snprintf(buf, sizeof buf, "moved x %.3f (ideal rolling %.3f, ratio %.3f)  z %.1e",
+                      a->position.x, -ideal, ratio, a->position.z);
+        check("R1 magnet rolls in a rotating field", ratio > 0.9f && ratio < 1.05f && std::fabs(a->position.z) < 1e-3f, buf);
+    }
+
+    // ---------------- G1. ガウス加速器（シーン D と同じ組み立て） ----------------
+    //   シーンで Enter を押したときと同じく、組み立ててすぐ最初の球を転がし、段と段の中間を
+    //   前向きに通った球の速さを測る。鉄球 3 個の段は、今のソルバで全段に球を送る。
+    //   鉄球 1 個の段は、入る球と出る球が磁石から同じ距離なので、出るエネルギーが 0
+    {
+        auto runGauss = [](int balls, demo::GaussMeter& meter) {
+            World w;
+            RigidBody* g = w.createBox({0, -1.0f, 0}, {30.0f, 1.0f, 30.0f}, 0.0f);
+            g->friction = 0.7f; g->restitution = 0.1f;
+            w.substeps = demo::MAG_SUBSTEPS;
+            demo::GaussParams p;
+            p.balls = balls;
+            demo::GaussRail r = demo::buildGaussRail(w, p);
+            r.launch->velocity = Vec3{2.0f, 0, 0};
+            meter.reset(p);
+            const int steps = (int)std::lround(20.0f / DT);
+            for (int i = 0; i < steps; ++i) {
+                meter.update(w, p);
+                w.step(DT);
+            }
+            return p.stages + 1;
+        };
+        std::string rows;
+        bool ok3 = false;
+        float e1 = demo::gaussStageEnergy(1), e3 = demo::gaussStageEnergy(3);
+        for (int balls = 1; balls <= 4; ++balls) {
+            demo::GaussMeter meter;
+            const int points = runGauss(balls, meter);
+            char row[128];
+            int  n = std::snprintf(row, sizeof row, " n=%d:", balls);
+            for (float v : meter.speeds) n += std::snprintf(row + n, sizeof row - n, " %.1f", v);
+            rows += row;
+            if (balls == 3) ok3 = meter.passed() == points && meter.speeds.back() > meter.speeds.front();
+        }
+        std::snprintf(buf, sizeof buf, "dE(n=1) %.3f  dE(n=3) %.2f  speeds at checkpoints%s", e1, e3, rows.c_str());
+        check("G1 Gauss accelerator (3 balls: all stages)", ok3 && e3 > 0.0f && std::fabs(e1) < 0.05f * e3, buf);
+    }
+
+    // ---------------- F1. 磁力線（シーン E） ----------------
+    //   磁石 1 個の磁力線は r = L sin^2(theta)（theta はモーメントからの角度）。たどった線の各点で
+    //   L が一定かを見る。本数は表面を出る磁束 2 pi m / a に比例（ここでは 20 本になるように設定）。
+    //   範囲の外に出なかった線は、磁石の S 極側に入って閉じる
+    {
+        World w;
+        RigidBody* mag = addMagnet(w, {0, 0, 0}, {0, 0, 1}, M0);
+        mag->setMass(0.0f);
+        w.magnets().updateMoments(1);
+        demo::FieldLineTracer tr;
+        tr.fluxPerLine = 2.0f * PHYS_PI * M0 / (1.01f * R_MAG) / 20.0f;
+        tr.traceAll(w);
+        float worst = 0.0f;
+        int   closed = 0, open = 0, wrongEnd = 0;
+        for (const demo::FieldLine& l : tr.lines()) {
+            auto Lof = [](const Vec3& p) {
+                const float r = length(p), s2 = (p.x * p.x + p.y * p.y) / (r * r);
+                return r / s2;
+            };
+            const float L0 = Lof(l.pts.front());
+            for (size_t k = 0; k + 1 < l.pts.size(); ++k)   // 最後の点は磁石の中
+                worst = std::max(worst, std::fabs(Lof(l.pts[k]) / L0 - 1.0f));
+            const Vec3& e = l.pts.back();
+            if (length(e) < R_MAG) { ++closed; if (e.z > 0.0f) ++wrongEnd; }
+            else ++open;
+        }
+        std::snprintf(buf, sizeof buf, "lines %d (closed %d, leave region %d)  max |L/L0 - 1| %.2e  end on N side %d",
+                      (int)tr.lines().size(), closed, open, worst, wrongEnd);
+        check("F1 dipole field lines r = L sin^2(theta)", worst < 0.01f && wrongEnd == 0 &&
+              std::abs((int)tr.lines().size() - 20) <= 1 && closed >= 10, buf);
+    }
+
+    // ---------------- S1. 床に落とした磁石が静止するか（記録のみ。デモのシーン 5 と 8） ----------------
+    {
+        const float sphereVol = 4.0f / 3.0f * PHYS_PI * R_MAG * R_MAG * R_MAG;
+        for (int cubes = 0; cubes < 2; ++cubes) {
+            World w;
+            w.substeps = SUBSTEPS;
+            RigidBody* ground = w.createBox({0, -1.0f, 0}, {30.0f, 1.0f, 30.0f}, 0.0f);
+            ground->friction = 0.7f; ground->restitution = 0.1f;
+            std::mt19937 rs(8);
+            std::uniform_real_distribution<float> u01(0.0f, 1.0f);
+            std::vector<Vec3> placed;
+            while ((int)placed.size() < 27) {
+                Vec3 p{(u01(rs) - 0.5f) * 5.0f, 1.2f + u01(rs) * 3.5f, (u01(rs) - 0.5f) * 5.0f};
+                bool ok = true;
+                for (const Vec3& q : placed) if (length(p - q) < 1.0f) { ok = false; break; }
+                if (!ok) continue;
+                placed.push_back(p);
+                Vec3 d = normalize(Vec3{u01(rs) - 0.5f, u01(rs) - 0.5f, u01(rs) - 0.5f});
+                RigidBody* b;
+                if (cubes) {
+                    const float V = 0.125f;
+                    b = w.createMagnetBox(p, {0.25f, 0.25f, 0.25f}, M_MAG * V / sphereVol,
+                                          {0, M0 * V / sphereVol, 0}, Quat::fromAxisAngle(d, u01(rs) * 6.28f));
+                    b->restitution = 0.2f; b->friction = 0.4f;
+                } else {
+                    b = w.createMagnet(p, R_MAG, M_MAG, d * M0);
+                    b->restitution = 0.3f; b->friction = 0.3f; b->rollingFriction = 0.01f;
+                }
+            }
+            std::string table;
+            float t = 0.0f;
+            for (float mark : {2.0f, 5.0f, 10.0f, 15.0f}) {
+                while (t < mark - 1e-4f) { w.step(DT); t += DT; }
+                float K = 0.0f, Kmax = 0.0f;
+                for (const auto& b : w.getBodies()) {
+                    if (b->isStatic()) continue;
+                    float M = 1.0f / b->invMass;
+                    Vec3 wl = b->orientation.toMat3().transposed() * b->angularVelocity;
+                    float k = 0.5f * M * lengthSq(b->velocity) +
+                              0.5f * (wl.x * wl.x / b->invInertiaLocal.x + wl.y * wl.y / b->invInertiaLocal.y +
+                                      wl.z * wl.z / b->invInertiaLocal.z);
+                    K += k; Kmax = std::max(Kmax, k);
+                }
+                char row[64];
+                std::snprintf(row, sizeof row, " t=%.0f K=%.3g(max %.2g)", mark, K, Kmax);
+                table += row;
+            }
+            info(cubes ? "S1 27 cube magnets settle" : "S1 27 sphere magnets settle", table.c_str());
+        }
+    }
+
     // ---------------- B1. 総当たりのコスト（記録のみ） ----------------
     {
         const int Ns[] = {64, 202, 302, 502};
@@ -495,6 +970,28 @@ int main(int argc, char** argv) {
                           pairs, nsPair, msFrame);
             char name[32];
             std::snprintf(name, sizeof name, "B1 applyForces N=%d", N);
+            info(name, buf);
+        }
+    }
+
+    // ---------------- B2. 立方体の磁石が密集したときのコスト（記録のみ） ----------------
+    {
+        const int Ns[] = {27, 64};
+        for (int N : Ns) {
+            World w;
+            const int side = (N == 27) ? 3 : 4;
+            for (int k = 0; k < N; ++k)
+                addMagnetBox(w, {(k % side) * 0.55f, ((k / side) % side) * 0.55f, (k / (side * side)) * 0.55f},
+                             {0.25f, 0.25f, 0.25f}, M_MAG, randomDir() * M0);
+            const int iters = 200;
+            w.magnets().applyForces();
+            auto t0 = std::chrono::steady_clock::now();
+            for (int it = 0; it < iters; ++it) w.magnets().applyForces();
+            auto t1 = std::chrono::steady_clock::now();
+            double ms = std::chrono::duration<double>(t1 - t0).count() * 1e3 / iters;
+            std::snprintf(buf, sizeof buf, "%.3f ms/call  -> %.2f ms/frame", ms, 16.0 * ms);
+            char name[32];
+            std::snprintf(name, sizeof name, "B2 cube cluster N=%d", N);
             info(name, buf);
         }
     }

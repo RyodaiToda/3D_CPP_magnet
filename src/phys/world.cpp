@@ -3,19 +3,20 @@
 //
 // 1 ステップは dt / substeps の刻みで substeps 回のサブステップに分ける。
 // 1 サブステップの流れ：
-//   0. 磁力（磁性体の力・トルクを body->force / torque に加算）
-//   1. 外力の積分（重力・力・トルク → 速度）
+//   0. 磁力（磁性体の力・トルクを body->force / torque に加算）、電流の導線の力、電気の力（静電気・渦電流）
+//   1. 外力の積分（重力・力・トルク → 速度）。電荷を持つ物体の速度を磁場のまわりに回す（ローレンツ力）
 //   2. Broadphase（AABB の総当たり）
-//   3. Narrowphase（接触マニフォールド生成）
+//   3. Narrowphase（接触マニフォールド生成）。触れた導体どうし・導体と板で電荷をやり取りする
 //   4. ウォームスタート（前フレームのインパルスを再利用）
 //   5. 制約の前計算（実効質量・反発バイアス）
 //   6. 速度の反復解法（法線インパルス ＋ 摩擦インパルス）
 //   7. 位置の積分
 //   8. めり込みの位置補正
-// substeps = 1 で磁性体がなければ、サブステップのない 1 ステップと同じになる。
+// substeps = 1 で磁性体も電気の物体もなければ、サブステップのない 1 ステップと同じになる。
 // ---------------------------------------------------------------------------
 #include "phys/world.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace phys {
@@ -95,6 +96,53 @@ RigidBody* World::createSoftMagnet(const Vec3& position, float radius, float mas
     return body;
 }
 
+RigidBody* World::createMagnetBox(const Vec3& position, const Vec3& halfExtents, float mass,
+                                  const Vec3& momentLocal, const Quat& orientation) {
+    RigidBody* body = createBox(position, halfExtents, mass);
+    body->orientation = orientation;
+    magnets_.add(body, momentLocal);
+    return body;
+}
+
+RigidBody* World::createSoftMagnetBox(const Vec3& position, const Vec3& halfExtents, float mass,
+                                      const Vec3& alphaLocal, float saturation, const Quat& orientation) {
+    RigidBody* body = createBox(position, halfExtents, mass);
+    body->orientation = orientation;
+    magnets_.add(body, Vec3{0, 0, 0}, alphaLocal, saturation);
+    return body;
+}
+
+RigidBody* World::createChargedSphere(const Vec3& position, float radius, float mass, float charge, bool conductor) {
+    RigidBody* body = createSphere(position, radius, mass);
+    electric_.addBody(body, charge, conductor);
+    return body;
+}
+
+RigidBody* World::createConductorSphere(const Vec3& position, float radius, float mass, float sigma, float spacing) {
+    RigidBody* body = createSphere(position, radius, mass);
+    electric_.addBody(body, 0.0f, true, sigma, spacing);
+    return body;
+}
+
+RigidBody* World::createConductorBox(const Vec3& position, const Vec3& halfExtents, float mass, float sigma,
+                                     const Quat& orientation, float spacing) {
+    RigidBody* body = createBox(position, halfExtents, mass);
+    body->orientation = orientation;
+    electric_.addBody(body, 0.0f, false, sigma, spacing);
+    return body;
+}
+
+int World::createCapacitor(const Vec3& center, const Quat& orientation, float halfX, float halfZ, float gap, float thickness,
+                           float potentialA, float potentialB) {
+    const Vec3 n   = orientation.rotate(Vec3{0, 1, 0});
+    const Vec3 off = n * (0.5f * gap + 0.5f * thickness);
+    RigidBody* a = createBox(center - off, Vec3{halfX, 0.5f * thickness, halfZ}, 0.0f);
+    RigidBody* b = createBox(center + off, Vec3{halfX, 0.5f * thickness, halfZ}, 0.0f);
+    a->orientation = orientation;
+    b->orientation = orientation;
+    return electric_.addCapacitor(a, b, potentialA, potentialB, center, orientation, Vec3{halfX, 0.5f * gap, halfZ});
+}
+
 void World::clear() {
     bodies_.clear();
     manifolds_.clear();
@@ -102,7 +150,36 @@ void World::clear() {
     pairs_.clear();
     aabbs_.clear();
     magnets_.clear();
+    magnets_.extraField = nullptr;
+    electric_.clear();
+    currents_.clear();
+    pinned_.clear();
+    pinAnchor_.clear();
     nextId_ = 0;
+}
+
+void World::setPinned(RigidBody* body, bool pinned) {
+    if ((int)pinned_.size() <= body->id) {
+        pinned_.resize(body->id + 1, 0);
+        pinAnchor_.resize(body->id + 1);
+    }
+    pinned_[body->id]    = pinned ? 1 : 0;
+    pinAnchor_[body->id] = body->position;
+    if (pinned) body->velocity = Vec3{0, 0, 0};
+}
+
+bool World::isPinned(const RigidBody* body) const {
+    return body->id < (int)pinned_.size() && pinned_[body->id];
+}
+
+// 固定した物体の並進を止める（回転はそのまま）
+void World::holdPinned(bool resetPosition) {
+    for (size_t id = 0; id < pinned_.size(); ++id) {
+        if (!pinned_[id]) continue;
+        RigidBody* b = bodies_[id].get();
+        b->velocity = Vec3{0, 0, 0};
+        if (resetPosition) b->position = pinAnchor_[id];
+    }
 }
 
 EnergyReport World::energy() const {
@@ -118,7 +195,10 @@ EnergyReport World::energy() const {
                                 w.z * w.z / b->invInertiaLocal.z);
         e.gravity -= M * dot(gravity, b->position);
     }
+    // 導線の場の中の磁性体のエネルギーは magnetic に入る（電源がする仕事は数えない）
+    const_cast<MagnetSystem&>(magnets_).extraField = currents_.empty() ? nullptr : &currents_;
     e.magnetic = magnets_.potentialEnergy();
+    if (!electric_.empty()) e.electric = electric_.potentialEnergy();
     return e;
 }
 
@@ -135,8 +215,8 @@ void World::integrateForces(float dt) {
     for (auto& b : bodies_) {
         b->updateInertiaWorld();
         if (b->isStatic()) {
-            b->velocity = Vec3{0, 0, 0};
-            b->angularVelocity = Vec3{0, 0, 0};
+            b->velocity = b->kinematicVelocity;
+            b->angularVelocity = b->kinematicAngularVelocity;
             b->force = Vec3{0, 0, 0};
             b->torque = Vec3{0, 0, 0};
             continue;
@@ -154,7 +234,7 @@ void World::integrateForces(float dt) {
 }
 
 // ===========================================================================
-// 2. Broadphase : AABB の総当たり（数百体までなら十分実用的）
+// 2. Broadphase : AABB の総当たり（動く物体 x 全物体。数百体までなら十分実用的）
 // ===========================================================================
 void World::broadphase() {
     const int n = (int)bodies_.size();
@@ -164,14 +244,21 @@ void World::broadphase() {
         aabbs_[i].expand(0.02f); // 少し膨らませて接触の取りこぼしを防ぐ
     }
 
+    // 静的どうしは調べない。動く物体ごとに全物体と比べ（動く物体どうしは i < j のときだけ）、
+    // 総当たり（i < j の辞書順）と同じ並びに並べ直す（ソルバの結果を変えない）。
+    // 静的な物体が多い場面（ゲームの大きなマップ）で、動く物体の数 x 全物体の数で済む
+    dynamic_.clear();
+    for (int i = 0; i < n; ++i)
+        if (!bodies_[i]->isStatic()) dynamic_.push_back(i);
     pairs_.clear();
-    for (int i = 0; i < n; ++i) {
-        for (int j = i + 1; j < n; ++j) {
-            if (bodies_[i]->isStatic() && bodies_[j]->isStatic()) continue;
+    for (int i : dynamic_) {
+        for (int j = 0; j < n; ++j) {
+            if (j == i || (j < i && !bodies_[j]->isStatic())) continue;
             if (!aabbs_[i].overlaps(aabbs_[j])) continue;
-            pairs_.emplace_back(i, j);
+            pairs_.emplace_back(std::min(i, j), std::max(i, j));
         }
     }
+    std::sort(pairs_.begin(), pairs_.end());
 }
 
 // ===========================================================================
@@ -235,7 +322,7 @@ static inline float effectiveMass(const RigidBody* A, const RigidBody* B,
     return (k > 1e-9f) ? 1.0f / k : 0.0f;
 }
 
-void World::prepareConstraints(float dt) {
+void World::prepareConstraints(float /*dt*/) {
     for (auto& m : manifolds_) {
         RigidBody* A = m.a;
         RigidBody* B = m.b;
@@ -250,14 +337,20 @@ void World::prepareConstraints(float dt) {
             c.tangentMass[1] = effectiveMass(A, B, c.rA, c.rB, m.tangent[1]);
 
             // 反発：接近速度が十分大きいときだけ跳ね返す（微振動を防ぐ）
-            //   磁性体どうしの接触では、引き合う力が 1 刻みで与える接近速度の 2 倍を
-            //   しきい値に足す。接触がわずかに離れた 1 刻みで得た引き込み速度を「衝突」と
-            //   して跳ね返すと、くっついた磁石が毎刻み震え続けるため。
-            //   磁性体どうしでなければ contactPull は 0 で、従来と同じ。
-            Vec3  relVel = B->velocityAt(c.rB) - A->velocityAt(c.rA);
-            float vn     = dot(relVel, m.normal);
-            float threshold = restitutionThreshold + 2.0f * magnets_.contactPull(A, B) * dt;
-            c.velocityBias = (vn < -threshold) ? m.restitution * vn : 0.0f;
+            //   磁性体が関わる接触では、この刻みの力を積分する前の速度で判定する。
+            //   積分後の速度には、この刻みで磁力が与えた引き込み速度（塊の中では 1 刻みで
+            //   秒速十数）が含まれ、押し付けられているだけの接触を「衝突」として跳ね返して
+            //   エネルギーを注入してしまうため。磁性体がなければ従来と同じ。
+            Vec3 relVel;
+            if (magnets_.indexOf(A) >= 0 || magnets_.indexOf(B) >= 0 || electric_.indexOf(A) >= 0 || electric_.indexOf(B) >= 0 ||
+                currents_.indexOf(A) >= 0 || currents_.indexOf(B) >= 0) {
+                relVel = (preVelocity_[B->id] + cross(preAngularVelocity_[B->id], c.rB))
+                       - (preVelocity_[A->id] + cross(preAngularVelocity_[A->id], c.rA));
+            } else {
+                relVel = B->velocityAt(c.rB) - A->velocityAt(c.rA);
+            }
+            float vn = dot(relVel, m.normal);
+            c.velocityBias = (vn < -restitutionThreshold) ? m.restitution * vn : 0.0f;
         }
 
         // 前フレームから引き継いだインパルスを先に適用しておく
@@ -421,15 +514,36 @@ void World::step(float dt) {
 }
 
 void World::substep(float h) {
+    // 反発の判定用に、力を積分する前の速度を残す（body->id は bodies_ の添字と同じ）
+    const bool electric = !electric_.empty();
+    if (!magnets_.bodies().empty() || electric || !currents_.empty()) {
+        preVelocity_.resize(bodies_.size());
+        preAngularVelocity_.resize(bodies_.size());
+        for (const auto& b : bodies_) {
+            preVelocity_[b->id]        = b->velocity;
+            preAngularVelocity_[b->id] = b->angularVelocity;
+        }
+    }
+    // 導線: 頂点を更新し、磁性体の点の場に導線の場が入るようにつなぐ（World は値で持たれるので毎回設定する）
+    const bool currents = !currents_.empty();
+    if (currents) currents_.prepare();
+    magnets_.extraField = currents ? &currents_ : nullptr;
     magnets_.applyForces();
+    if (currents) currents_.applyForces(magnets_);
+    if (electric) electric_.applyForces(magnets_, h, currents ? &currents_ : nullptr);
     integrateForces(h);
+    if (electric) electric_.rotateLorentz(magnets_, h, currents ? &currents_ : nullptr);
+    holdPinned(false);        // 固定した物体は力で並進しない
     broadphase();
     narrowphase();
+    if (electric) electric_.exchangeCharges(manifolds_);
     warmStart();
     prepareConstraints(h);
     solveVelocities();
+    holdPinned(false);        // 接触で得た並進速度も捨てる
     integratePositions(h);
     correctPositions();
+    holdPinned(true);         // めり込み補正で動いた位置を固定点に戻す
 
     // 次フレームのウォームスタート用に保存
     prevManifolds_.clear();

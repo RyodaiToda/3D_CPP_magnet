@@ -1,0 +1,249 @@
+% LuaLaTeX でコンパイルしてください(Overleaf: Menu → Compiler → LuaLaTeX)
+\documentclass[a4paper,11pt]{ltjsarticle}
+
+\usepackage[margin=25mm]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs}
+\usepackage[most]{tcolorbox}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\Win}{W_{\mathrm{in}}}
+\newcommand{\Wout}{W_{\mathrm{out}}}
+\newcommand{\yt}{\bm{y}_{\mathrm{teach}}}
+\newcommand{\T}{^{\top}}
+\newcommand{\tr}{\operatorname{tr}}
+
+\newtcolorbox{keybox}[1][]{colback=blue!4,colframe=blue!50!black,
+  fonttitle=\bfseries,arc=2pt,boxrule=0.6pt,#1}
+
+\title{リザバーコンピューティングの学習と\\最適制御的なリードアウト設計}
+\date{}
+
+\begin{document}
+\maketitle
+
+%===========================================================
+\section{リザバーコンピューティングの学習}
+%===========================================================
+
+リザバーコンピューティング(RC)は,ネットワーク本体は学習せず,
+出力層(リードアウト)だけを学習する手法である.
+
+\subsection{構造}
+
+\begin{align}
+  \bm{x}(t+1) &= \tanh\!\bigl(W\bm{x}(t) + \Win\bm{u}(t)\bigr)
+  && \text{(リザバー: $W,\Win$ はランダムに固定)} \\
+  \bm{y}(t) &= \Wout\,\bm{x}(t)
+  && \text{(リードアウト: ここだけ学習)}
+\end{align}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+対象 & 学習するか & 備考 \\
+\midrule
+入力重み $\Win$ & しない & ランダム固定 \\
+内部結合 $W$ & しない & スペクトル半径のみ調整 \\
+出力重み $\Wout$ & \textbf{する} & リッジ回帰など \\
+ハイパーパラメータ & しない & 検証データで選択 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{リッジ回帰による学習}
+
+訓練入力をリザバーに流し,各時刻の状態を列に並べた行列
+$X = [\bm{x}(1),\dots,\bm{x}(T)]$ と,教師信号の行列
+$Y = [\yt(1),\dots,\yt(T)]$ を作る
+(最初の数百ステップは初期値の影響が残るため,ウォッシュアウトとして捨てる).
+
+\begin{keybox}[title=リッジ回帰の解]
+\begin{equation}
+  \Wout = Y X\T \bigl(X X\T + \lambda I\bigr)^{-1}
+  \label{eq:ridge}
+\end{equation}
+\end{keybox}
+
+勾配降下も BPTT も不要で,RNN 学習における勾配消失・爆発の問題を回避できる.
+
+\subsection{ランダムなリザバーで動く理由}
+
+\begin{itemize}
+  \item \textbf{エコーステート性}:状態が初期値ではなく入力履歴だけで決まる性質.
+        実用上は $W$ のスペクトル半径 $\rho(W)$ を $1$ 弱($0.9$--$0.99$ 程度)にスケーリングする.
+  \item \textbf{高次元への非線形展開}:入力履歴が高次元状態空間に非線形に埋め込まれ,
+        線形読み出しだけで複雑な関数を近似できる(カーネル法に近い発想).
+  \item \textbf{メモリと非線形性のトレードオフ}:$\rho(W)$,入力スケール,リーク率などで調整する.
+\end{itemize}
+
+%===========================================================
+\section{リッジ回帰は既に LQR 型の目的関数である}
+%===========================================================
+
+制御理論で極配置 $\bm{u} = -K\bm{x}$ の代わりに目的関数を最小化する $\bm{u}$ を考えたのと同様に,
+リードアウト学習の目的関数を LQR 風に一般化する.
+
+\begin{keybox}[title=一般化した目的関数]
+\begin{equation}
+  J(\Wout) = \sum_{t} \bm{e}(t)\T Q\, \bm{e}(t)
+           + \tr\!\bigl(\Wout R\, \Wout\T\bigr),
+  \qquad
+  \bm{e}(t) = \yt(t) - \Wout\bm{x}(t)
+  \label{eq:J}
+\end{equation}
+\end{keybox}
+
+\begin{itemize}
+  \item $Q \succ 0$:誤差の重み(LQR の状態コストに相当)
+  \item $R \succ 0$:重みの大きさへのペナルティ(LQR の制御コストに相当)
+\end{itemize}
+
+通常のリッジ回帰は $Q = I$, $R = \lambda I$ の特殊ケースである:
+\begin{equation}
+  J = \underbrace{\sum_t \bigl\|\yt(t) - \Wout\bm{x}(t)\bigr\|^2}_{\text{状態コスト($Q$ 相当)}}
+    + \underbrace{\lambda\,\|\Wout\|_F^2}_{\text{制御コスト($R$ 相当)}} .
+\end{equation}
+
+\subsection{最適解:Sylvester 方程式}
+
+$R$ を対称として $\partial J / \partial \Wout = 0$ とおくと
+\begin{equation}
+  -2\,Q\bigl(Y - \Wout X\bigr)X\T + 2\,\Wout R = 0
+\end{equation}
+より,次の Sylvester 方程式を得る.
+
+\begin{keybox}[title=最適リードアウトの条件]
+\begin{equation}
+  Q\,\Wout\,(X X\T) + \Wout R = Q\, Y X\T
+  \label{eq:sylvester}
+\end{equation}
+\end{keybox}
+
+これは \texttt{scipy.linalg.solve\_sylvester} で直接解ける.
+$Q = I,\ R = \lambda I$ とすれば式~\eqref{eq:ridge} に戻る.
+
+\subsection{対角 $Q$ の場合:出力ごとの実効正則化}
+
+$Q = \mathrm{diag}(q_1,\dots,q_m)$,$R = \lambda I$ のとき,
+$\Wout$ の第 $i$ 行 $\bm{w}_i$ と $Y$ の第 $i$ 行 $\bm{y}_i$ について問題は分解でき,
+\begin{equation}
+  \bm{w}_i = \bm{y}_i X\T \Bigl(X X\T + \frac{\lambda}{q_i} I\Bigr)^{-1}
+\end{equation}
+となる.すなわち実効的な正則化強度は $\lambda / q_i$ である.
+
+\begin{itemize}
+  \item $q_i$ 大:その出力は忠実にフィットする
+  \item $q_i$ 小:その出力は多少ずれてもよいから重みを小さくする(汎化重視)
+\end{itemize}
+
+%===========================================================
+\section{$R$ の設計:状態空間のどの方向を信用するか}
+%===========================================================
+
+$X$ の特異値分解を $X = U \Sigma V\T$($\Sigma = \mathrm{diag}(\sigma_1,\sigma_2,\dots)$)とする.
+リッジ回帰の当てはめ値は
+\begin{equation}
+  \hat{Y} = \Wout X = Y \sum_i \bm{v}_i
+    \underbrace{\frac{\sigma_i^2}{\sigma_i^2 + \lambda}}_{\text{縮小率}} \bm{v}_i\T
+\end{equation}
+と書け,各主成分方向の寄与を縮小率 $\sigma_i^2/(\sigma_i^2+\lambda)$ で抑えている.
+
+\begin{itemize}
+  \item 分散が大きい方向($\sigma_i^2 \gg \lambda$):ほぼそのまま使う(縮小率 $\approx 1$)
+  \item 分散が小さい方向($\sigma_i^2 \ll \lambda$):強く抑える(縮小率 $\approx 0$)
+\end{itemize}
+
+分散の小さい方向はノイズに敏感で,
+\textbf{訓練データには効くが予測では裏切る}方向である.そこで
+\begin{itemize}
+  \item $R = \Gamma\T\Gamma$ を「低分散方向ほど強く罰する」よう非等方に設計する(一般化 Tikhonov 正則化)
+  \item 極端には低分散方向を完全に切り捨てる(打ち切り SVD/主成分回帰)
+\end{itemize}
+とすれば,「訓練精度を捨てて予測精度を取る」を方向ごとに制御できる.
+
+\paragraph{補足(推定と制御の双対性)}
+リッジ回帰は,$\Wout$ の各行に事前分布 $\mathcal{N}(\bm{0},\,R^{-1})$ を置いた MAP 推定と解釈できる.
+これはカルマンフィルタと LQR の双対性とも整合する.
+
+%===========================================================
+\section{LQR の類推が本当に効くのは閉ループ予測}
+%===========================================================
+
+自律生成モード(自分の出力を入力にフィードバックする)では,状態の時間発展が変わる:
+\begin{align}
+  \text{開ループ(訓練時,teacher forcing)}:\quad
+  & \bm{x}(t+1) = \tanh\!\bigl(W\bm{x}(t) + \Win\yt(t)\bigr) \\
+  \text{閉ループ(予測時,自由走行)}:\quad
+  & \bm{x}(t+1) = \tanh\!\bigl((W + \Win\Wout)\,\bm{x}(t)\bigr)
+  \label{eq:closed}
+\end{align}
+
+式~\eqref{eq:closed} を線形化すると $\bm{x}(t+1) \approx D(t)\,(W + \Win \Wout)\,\bm{x}(t)$
+($D(t)$ は $\tanh$ の微分を並べた対角行列)となり,線形状態フィードバック系
+$\bm{x}(t+1) = (A - BK)\bm{x}(t)$ と次のように対応する.
+
+\begin{center}
+\begin{tabular}{ccc}
+\toprule
+制御理論 & & リザバー \\
+\midrule
+$A$ & $\leftrightarrow$ & $W$ \\
+$B$ & $\leftrightarrow$ & $\Win$ \\
+$-K$ & $\leftrightarrow$ & $\Wout$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{keybox}[title=要点]
+$\Wout$ は\textbf{状態フィードバックゲインそのもの}である.
+訓練時の 1 ステップ誤差を最小化しても閉ループの安定性は保証されない.
+「訓練精度と予測精度の乖離」の正体は,\textbf{開ループ最適 $\neq$ 閉ループ安定}という
+制御でおなじみの問題である.
+\end{keybox}
+
+\subsection{既知の処方箋と $Q, R$ との対応}
+
+\paragraph{(1) ノイズ注入学習}
+訓練時の状態に平均 $\bm{0}$,共分散 $\Sigma_n$ のノイズ $N$ を加えて回帰すると,
+\begin{equation}
+  \mathbb{E}\bigl[(X+N)(X+N)\T\bigr] = X X\T + T\,\Sigma_n
+\end{equation}
+より,期待値の意味で $R = T\,\Sigma_n$ の一般化 Tikhonov 正則化と等価になる(Bishop, 1995).
+\textbf{ノイズの共分散がそのまま $R$ の役割を果たし},
+フィードバック誤差が蓄積しても発散しにくい $\Wout$ に寄る.
+
+\paragraph{(2) FORCE 学習}
+RLS(再帰最小二乗法)で誤差を常に小さく保ちながら,閉ループのまま $\Wout$ を更新する.
+オンライン LQG に近い考え方である.
+
+\paragraph{(3) 多段先予測コスト(MPC のホライズンコストの類推)}
+\begin{keybox}[title=多段先予測コスト]
+\begin{equation}
+  J(\Wout) = \sum_{t}\sum_{k=1}^{H} \gamma^{k}\,
+    \bigl\|\hat{\bm{y}}(t+k \mid t) - \yt(t+k)\bigr\|^2
+\end{equation}
+\end{keybox}
+ここで $\hat{\bm{y}}(t+k\mid t)$ は時刻 $t$ から式~\eqref{eq:closed} で $k$ ステップ自由走行させた予測値,
+$H$ は予測ホライズン,$\gamma \in (0,1]$ は割引率である.
+
+閉ループのロールアウトを含むため閉形式では解けず,
+ロールアウトを通した勾配降下(微分可能シミュレーション)で解く.
+「1 ステップの訓練精度を明示的に犠牲にして $k$ ステップ先の予測を最適化する」という,
+最も直接的な定式化である.
+
+%===========================================================
+\section{進め方の案}
+%===========================================================
+
+\begin{enumerate}
+  \item 標準 ESN + リッジ回帰でベースラインを作る(例:Lorenz 系の自律生成).
+        「訓練誤差は小さいのに自由走行で軌道が崩れる」現象を再現する.
+  \item $Q, R$ 付き Sylvester 版(式~\eqref{eq:sylvester})とノイズ注入版で,
+        閉ループ性能の変化を比較する($\lambda$ の掃引 vs.\ $R$ の形状設計).
+  \item 多段先予測コストを勾配法で解き,閉形式解との差を見る.
+  \item 発展:磁石シミュレータ(磁気双極子系の非線形ダイナミクス)を
+        物理リザバーに見立てて同じ実験を行う.
+\end{enumerate}
+
+\end{document}

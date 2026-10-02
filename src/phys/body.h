@@ -38,6 +38,12 @@ struct RigidBody {
     Vec3 force{0, 0, 0};
     Vec3 torque{0, 0, 0};
 
+    // --- 静的物体を動かすとき（動く台・回る扉など）の速度 ---
+    //   静的物体の velocity は毎サブステップこの値になる（接触の摩擦・反発が動きを見る）。
+    //   位置と姿勢は呼び出し側が書き換える
+    Vec3 kinematicVelocity{0, 0, 0};
+    Vec3 kinematicAngularVelocity{0, 0, 0};
+
     // --- 質量特性 ---
     float invMass = 1.0f;
     Vec3  invInertiaLocal{1, 1, 1}; // ローカル慣性テンソルの逆（対角のみ）
