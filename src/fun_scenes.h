@@ -61,7 +61,9 @@ public:
     virtual void hud(const phys::World& /*w*/, HudLines& /*out*/) const {}
     virtual bool ownsField() const { return false; }  // 外部磁場をシーンが動かす（E キーは使わない）
     virtual bool wantsFieldLines() const { return false; }   // 磁力線（O キー）を最初から出す
-    virtual float fieldLineFlux() const { return 0.0f; }     // 磁力線 1 本あたりの磁束（0 なら磁石の既定値）
+    virtual float fieldLineFlux() const { return 0.0f; }
+    virtual bool ownsSpace() const { return false; }   // Space をシーンが使う（main の「磁石を撃つ」を止める）
+    virtual bool compactHud() const { return false; }  // 汎用の HUD（操作の案内・エネルギー）を出さず、シーンの行だけにする     // 磁力線 1 本あたりの磁束（0 なら磁石の既定値）
     // 毎フレーム、描く前に呼ぶ（screenPoint: マウスの位置。FPS 視点では画面の中心）
     virtual void updateView(const phys::World& /*w*/, const Camera3D& /*cam*/, Vector2 /*screenPoint*/) {}
     virtual void draw2D(const phys::World& /*w*/, const Camera3D& /*cam*/) const {}   // 3D の後の 2D 表示

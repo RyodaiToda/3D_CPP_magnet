@@ -104,8 +104,11 @@ Vec3 loopField(const Vec3& c, const Vec3& n, float a, const Vec3& p, float curre
     double K, E;
     ellipticKE(4.0 * a * rho / alpha2, K, E);
     const double common = 2.0 * current / std::sqrt(alpha2);   // mu0 I / 2 pi = 2 K I
-    const double Bz   = common * (K + (a * a - rho * rho - z * z) / beta2 * E);
-    const double Brho = rho > 1e-9 ? common * z / rho * (-K + (a * a + rho * rho + z * z) / beta2 * E) : 0.0;
+    // a^2 は double で。B_rho の括弧は K と E の差（軸のそばでは rho^2 の桁）なので、a*a を float で丸めると
+    // 軸から 1e-3 a 以内で符号まで狂い、軸上の点に軸と垂直な場が出る（コイルガンの弾が蹴られた）
+    const double aa   = (double)a * (double)a;
+    const double Bz   = common * (K + (aa - rho * rho - z * z) / beta2 * E);
+    const double Brho = rho > 1e-9 ? common * z / rho * (-K + (aa + rho * rho + z * z) / beta2 * E) : 0.0;
     return n * (float)Bz + rhoHat * (float)Brho;
 }
 

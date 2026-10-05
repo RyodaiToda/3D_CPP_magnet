@@ -51,7 +51,7 @@ def find_window(pid, timeout=10.0):
     return found[0] if found else None
 
 
-VK = {'-': 0xBD, '=': 0xBB, 'enter': 0x0D, 'bksp': 0x08, 'up': 0x26, 'down': 0x28, 'left': 0x25, 'right': 0x27}
+VK = {'-': 0xBD, '=': 0xBB, 'enter': 0x0D, 'bksp': 0x08, 'space': 0x20, 'up': 0x26, 'down': 0x28, 'left': 0x25, 'right': 0x27}
 VK.update({'f%d' % (k + 1): 0x70 + k for k in range(12)})   # F1〜F12（電気のシーンは F5〜F8）
 EXTENDED = {'up', 'down', 'left', 'right'}
 # raylib（GLFW）はスキャンコードでキーを決める。'=' は US 配列の位置（JIS 配列では ^）の 0x0D を直接送る
@@ -229,6 +229,8 @@ def main():
              [('enter', 0.6, 0.7)]),
             (['f11'],    'sceneF11_helmholtz.gif',      12.0,        # ヘルムホルツ → 磁気鏡 → カスプ
              [('m', 4.0, 4.1), ('m', 8.0, 8.1)]),
+            (['f12'],    'sceneF12_coil_gun_game.gif',  12.0,        # コイル砲台: 自動のタイミングで 2 発撃ち、敵の弾を受け止める
+             [('v', 0.3, 0.4), ('space', 1.0, 1.1), ('d', 3.5, 3.8), ('space', 4.5, 4.6)]),
         ]
         for keys, name, seconds, hold in realtime_jobs:
             for key in keys:

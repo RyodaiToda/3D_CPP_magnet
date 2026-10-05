@@ -10,6 +10,7 @@
 //     1 - 8, 9, 0, -, =, BkSp : シーン切り替え（9, 0, -, =, Backspace は fun_scenes.cpp の A〜E）
 //     F5 - F8                 : 電気のシーン（electric_scenes.cpp。電気ベル、荷電粒子、渦電流、電気力線）
 //     F9 - F11                : 電流のシーン（current_scenes.cpp。エルステッドと輪の塔、電磁石とコイルガン、ヘルムホルツ）
+//     F12                     : コイル砲台のシューティング（coilgun_scene.cpp。段のタイミングが火力、同じコイルで受け止める）
 //     R                       : シーンをリセット
 //     P                       : 一時停止 / 再開
 //     N                       : 1 ステップだけ進める（一時停止中）
@@ -34,6 +35,7 @@
 
 #include "demo_common.h"
 #include "field_lines.h"
+#include "coilgun_scene.h"
 #include "current_scenes.h"
 #include "electric_scenes.h"
 #include "fun_scenes.h"
@@ -195,7 +197,7 @@ struct Demo {
                     : (index == 10) ? makeCompassScene() : (index == 11) ? makeGaussScene()
                     : (index == 12) ? makeFieldScene() : (index == 13) ? makeBellScene()
                     : (index == 14) ? makeLorentzScene() : (index == 15) ? makeEddyScene() : (index == 16) ? makeEFieldScene()
-                    : (index == 17) ? makeOerstedScene() : (index == 18) ? makeElectromagnetScene() : makeHelmholtzScene();
+                    : (index == 17) ? makeOerstedScene() : (index == 18) ? makeElectromagnetScene() : (index == 19) ? makeHelmholtzScene() : makeCoilGunScene();
             if (fresh) fieldLinesOn = fun->wantsFieldLines();
             if (fun->fieldLineFlux() > 0.0f) tracer.fluxPerLine = fun->fieldLineFlux();
             SceneHost h = host();
@@ -791,7 +793,7 @@ int main() {
                 camTarget.x + camDist * cosf(camPitch) * sinf(camYaw),
                 camTarget.y + camDist * sinf(camPitch),
                 camTarget.z + camDist * cosf(camPitch) * cosf(camYaw)};
-            if (IsKeyPressed(KEY_SPACE)) demo.shoot(camera);
+            if (IsKeyPressed(KEY_SPACE) && !(demo.fun && demo.fun->ownsSpace())) demo.shoot(camera);
             if (IsKeyPressed(KEY_W))     demo.wireframe = !demo.wireframe;
         }
 
@@ -859,7 +861,7 @@ int main() {
         if (IsKeyPressed(KEY_MINUS)) nextScene = 10;
         if (IsKeyPressed(KEY_EQUAL)) nextScene = 11;
         if (IsKeyPressed(KEY_BACKSPACE)) nextScene = 12;
-        for (int k = 0; k < 7; ++k)   // 電気のシーン（F5〜F8）と電流のシーン（F9〜F11）
+        for (int k = 0; k < 8; ++k)   // 電気のシーン（F5〜F8）、電流のシーン（F9〜F11）、コイル砲台（F12）
             if (IsKeyPressed(KEY_F5 + k)) nextScene = 13 + k;
         if (IsKeyPressed(KEY_O) && demo.sceneIndex >= 4) {
             demo.fieldLinesOn = !demo.fieldLinesOn;
@@ -933,8 +935,17 @@ int main() {
 
         if (demo.showHud) {
             const bool magScene = demo.sceneIndex >= 4;
+            const bool compact  = demo.fun && demo.fun->compactHud();   // ゲームのシーン: 汎用の案内を出さない
             HudLines hud;
             hud.add(demo.sceneName(), RAYWHITE, 20);
+            if (compact) {
+                hud.add(TextFormat("physics %.2f ms/frame   %d FPS   %s", demo.stepMs, GetFPS(), demo.paused ? "[PAUSED]" : ""), GRAY, 14);
+                hud.gap(6);
+                demo.fun->hud(demo.world, hud);
+                hud.draw(10, 10, 330);
+                EndDrawing();
+                continue;
+            }
             hud.add(TextFormat("bodies %d   contacts %d", demo.world.bodyCount(), demo.world.contactCount()));
             hud.add(TextFormat("physics %.2f ms/frame   %d FPS", demo.stepMs, GetFPS()));
             hud.add(TextFormat("gyroscopic %s   %s", demo.world.enableGyroscopic ? "ON" : "OFF",
@@ -950,7 +961,7 @@ int main() {
                         realTime ? Color{120, 220, 255, 255} : LIGHTGRAY);
             }
             hud.gap(6);
-            hud.add("SPACE shoot   1-8 9 0 - = BkSp scene   F5-F8 electric   F9-F11 currents   R reset   P pause   N step", GRAY);
+            hud.add("SPACE shoot   1-8 9 0 - = BkSp scene   F5-F8 electric   F9-F12 currents   R reset   P pause   N step", GRAY);
             hud.add(magScene ? "C contacts   G gyro   Z gravity   H hud   O field lines   L magnet material"
                              : "C contacts   G gyro   Z gravity   H hud", GRAY);
             hud.add(fps ? "FPS: mouse look  WASD walk  Space jump  Ctrl crouch  Shift run  click shoot  Tab/Esc exit"

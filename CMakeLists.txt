@@ -36,7 +36,7 @@ add_library(physics STATIC
 target_include_directories(physics PUBLIC src)
 
 # --- デモ ------------------------------------------------------------------
-add_executable(demo src/main.cpp src/fun_scenes.cpp src/electric_scenes.cpp src/current_scenes.cpp src/keymap.cpp)
+add_executable(demo src/main.cpp src/fun_scenes.cpp src/electric_scenes.cpp src/current_scenes.cpp src/coilgun_scene.cpp src/keymap.cpp)
 target_link_libraries(demo PRIVATE physics raylib)
 
 if(APPLE)

@@ -133,9 +133,18 @@ int main() {
             for (int s = 0; s < wr.segmentCount(); ++s) { Vec3 pa, pb; wr.segment(s, pa, pb); Bs += segmentField(pa, pb, p, I); }
             errPoly = std::max(errPoly, length(Bs - cs.fieldAt(p)) / length(cs.fieldAt(p)));
         }
-        std::snprintf(buf, sizeof buf, "center %.1e (2 pi I / a), on axis %.1e, dipole at 100 a %.1e, 64-gon segments vs circle %.2f%% (at 3.4 a the loop differs from a dipole by %.1f%%)",
-                      errC, errAxis, errFar, 100 * errPoly, 100 * errOff);
-        check("C2 loop field (center, axis, far dipole, polygon)", errC < 1e-4f && errAxis < 1e-4f && errFar < 1e-3f && errPoly < 1e-2f, buf);
+        // 軸のすぐそば: 軸と垂直な成分は B_rho = 3 pi I a^2 rho z / (a^2 + z^2)^(5/2) に近づき、軸上では 0
+        //（a^2 を float で丸めると K と E の差が桁落ちして、1e-3 a 以内で符号まで狂った。コイルガンの弾が蹴られて見つかった）
+        float errNear = 0.0f, onAxis = 0.0f;
+        for (float rho : {1e-6f, 1e-4f, 1e-3f, 1e-2f}) {
+            const float z = -1.0f, want = 3.0f * PHYS_PI * I * a * a * rho * z / std::pow(a * a + z * z, 2.5f);
+            const Vec3  B = cs.fieldAt({rho, z, 0});
+            errNear = std::max(errNear, std::fabs(B.x - want) / std::fabs(3.0f * PHYS_PI * I * a * a * 1e-2f / std::pow(a * a + z * z, 2.5f)));
+        }
+        for (float z : {-1.0f, 0.3f, 2.0f}) { const Vec3 B = cs.fieldAt({0, z, 0}); onAxis = std::max(onAxis, std::sqrt(B.x * B.x + B.z * B.z) / std::fabs(B.y)); }
+        std::snprintf(buf, sizeof buf, "center %.1e (2 pi I / a), on axis %.1e, dipole at 100 a %.1e, 64-gon segments vs circle %.2f%% (at 3.4 a the loop differs from a dipole by %.1f%%); near the axis B_rho vs 3 pi I a^2 rho z / r^5 %.1e, on-axis side component %.1e",
+                      errC, errAxis, errFar, 100 * errPoly, 100 * errOff, errNear, onAxis);
+        check("C2 loop field (center, axis, far dipole, polygon, near axis)", errC < 1e-4f && errAxis < 1e-4f && errFar < 1e-3f && errPoly < 1e-2f && errNear < 1e-3f && onAxis < 1e-6f, buf);
     }
 
     // ---------------- C3. 輪の軸上の磁石 ----------------
